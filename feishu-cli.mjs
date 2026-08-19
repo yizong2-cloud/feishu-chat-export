@@ -27,7 +27,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { connect, PAGE_HELPERS, EXTRACT_FN } from './export_lib.mjs';
-import { classifyPageState } from './cli-utils.mjs';
+import { classifyPageState, classifyStartupFailure } from './cli-utils.mjs';
 
 // ---------------- 参数解析 ----------------
 const args = process.argv.slice(2);
@@ -471,6 +471,7 @@ let ready = false;
 let incompatibleRuntime = false;
 let loginRequired = false;
 let feedVisibleAt = 0;
+let lastPageState = {};
 for (let i = 0; i < 90; i++) {
   await sleep(1000);
   const r = await evl(`(() => {
@@ -478,6 +479,7 @@ for (let i = 0; i < 90; i++) {
       return JSON.stringify({
         url: location.href,
         title: document.title,
+        readyState: document.readyState,
         feedCount: document.querySelectorAll('[data-feed-id]').length,
         feedStore: !!window.__feedStore,
         feedWindowStore: !!window.__FEED_WIN_STORE,
@@ -486,6 +488,7 @@ for (let i = 0; i < 90; i++) {
   })()`);
   let state;
   try { state = JSON.parse(r); } catch (e) { state = { feedCount: 0, feedStore: false, feedWindowStore: false }; }
+  lastPageState = state;
   const pageState = classifyPageState(state);
   if (pageState === 'login') { loginRequired = true; break; }
   if (state.feedCount > 0 && !feedVisibleAt) feedVisibleAt = Date.now();
@@ -498,6 +501,8 @@ if (!ready) {
     console.error('飞书登录页已出现，登录态可能已过期；请重新导出浏览器 Cookies 到 ' + COOKIES_FILE);
   } else if (incompatibleRuntime) {
     console.error('飞书页面已加载，但当前前端未提供导出器所需的数据接口（__feedStore / __FEED_WIN_STORE）。请升级 feishu_export 导出器，或检查飞书前端是否改版。');
+  } else if (classifyStartupFailure(lastPageState) === 'stalled') {
+    console.error('飞书页面已完成加载，但会话列表没有出现；这通常是登录态未被浏览器接受、租户页面未完成初始化，或前端资源被拦截。请先重新导出 Cookies，再用 --no-headless 观察页面；若仍复现，再检查飞书租户/前端是否改版。');
   } else {
     console.error('未能进入飞书（登录态可能已过期，请重新导出浏览器 Cookies 到 ' + COOKIES_FILE + '）');
   }

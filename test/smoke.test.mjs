@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { classifyPageState } from '../cli-utils.mjs';
+import { classifyPageState, classifyStartupFailure } from '../cli-utils.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const cli = path.join(root, 'feishu-cli.mjs');
@@ -37,4 +37,10 @@ test('startup classifier distinguishes login redirects from frontend incompatibi
   assert.equal(classifyPageState({ title: '请重新登录飞书' }), 'login');
   assert.equal(classifyPageState({ url: 'https://tenant.feishu.cn/next/messenger', feedCount: 2 }), 'incompatible');
   assert.equal(classifyPageState({ url: 'https://tenant.feishu.cn/next/messenger', feedCount: 2, feedStore: true, feedWindowStore: true }), 'ready');
+});
+
+test('startup classifier distinguishes a fully loaded page with no session list', () => {
+  assert.equal(classifyStartupFailure({ readyState: 'loading', feedCount: 0 }), 'loading');
+  assert.equal(classifyStartupFailure({ readyState: 'complete', feedCount: 0 }), 'stalled');
+  assert.equal(classifyStartupFailure({ readyState: 'complete', feedCount: 2 }), 'incompatible');
 });

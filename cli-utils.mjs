@@ -10,3 +10,14 @@ export function classifyPageState({ url = '', title = '', feedCount = 0, feedSto
   if (Number(feedCount) > 0) return 'incompatible'
   return 'loading'
 }
+
+// A completed document with no feed is different from a still-loading page:
+// it usually points to a session/bootstrap problem rather than a slow network.
+export function classifyStartupFailure(state = {}) {
+  const pageState = classifyPageState(state)
+  if (pageState !== 'loading') return pageState
+  if (String(state.readyState || '').toLowerCase() === 'complete' && Number(state.feedCount) === 0) {
+    return 'stalled'
+  }
+  return 'loading'
+}
