@@ -28,7 +28,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { connect, PAGE_HELPERS, EXTRACT_FN } from './export_lib.mjs';
-import { classifyPageState, classifyStartupFailure, hasFailedChats } from './cli-utils.mjs';
+import { classifyPageState, classifyStartupFailure, hasFailedChats, isRetryableChatStatus } from './cli-utils.mjs';
 
 // ---------------- 参数解析 ----------------
 const args = process.argv.slice(2);
@@ -455,6 +455,17 @@ async function processChat(send, evl, port, chat, T0, T1) {
   }
 }
 
+async function processChatWithRetry(send, evl, port, chat, T0, T1) {
+  let result = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    result = await processChat(send, evl, port, chat, T0, T1);
+    if (!isRetryableChatStatus(result.status) || attempt === 2) return result;
+    console.log(`  ${chat.title || chat.id}: ${result.status}，准备重试 (${attempt}/1)`);
+    await sleep(1000);
+  }
+  return result;
+}
+
 // ---------------- 输出 ----------------
 function buildMarkdown(chatResults) {
   const L = [];
@@ -561,7 +572,7 @@ let processed = 0;
 for (const chat of candidates) {
   processed++;
   try {
-    const r = await processChat(send, evl, port, chat, T0, T1);
+    const r = await processChatWithRetry(send, evl, port, chat, T0, T1);
     chatResults.push(r);
     const n = r.messages.length;
     if (r.status === 'ok') consecutiveOpenFailures = 0;
@@ -569,7 +580,7 @@ for (const chat of candidates) {
     if (n) console.log(`  [${processed}/${candidates.length}] ${(r.meta && r.meta.name) || chat.title || chat.id}: ${n} 条`);
     else if (r.status !== 'ok') console.log(`  [${processed}/${candidates.length}] ${chat.title || chat.id}: 跳过(${r.status})`);
     if (consecutiveOpenFailures >= MAX_CONSECUTIVE_OPEN_FAILURES) {
-      console.error(`连续 ${MAX_CONSECUTIVE_OPEN_FAILURES} 个会话无法打开（${chatResults.slice(-MAX_CONSECUTIVE_OPEN_FAILURES).map(x => x.status).join(', ')}），停止本次导出；请检查飞书页面状态或导出器兼容性。`);
+      console.error(`连续 ${MAX_CONSECUTIVE_OPEN_FAILURES} 个会话无法打开（${chatResults.slice(-MAX_CONSECUTIVE_OPEN_FAILURES).map(x => `${x.chat.title || x.chat.id}:${x.status}`).join(', ')}），停止本次导出；请检查飞书页面状态或导出器兼容性。`);
       try { proc.kill(); } catch (e) {}
       try { fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 6, retryDelay: 300 }); } catch (e) {}
       process.exit(2);

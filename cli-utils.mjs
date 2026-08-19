@@ -25,3 +25,7 @@ export function classifyStartupFailure(state = {}) {
 export function hasFailedChats(results = []) {
   return Array.isArray(results) && results.some((result) => result && result.status !== 'ok')
 }
+
+export function isRetryableChatStatus(status) {
+  return status === 'openfail' || status === 'applink'
+}

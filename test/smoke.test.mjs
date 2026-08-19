@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { classifyPageState, classifyStartupFailure, hasFailedChats } from '../cli-utils.mjs';
+import { classifyPageState, classifyStartupFailure, hasFailedChats, isRetryableChatStatus } from '../cli-utils.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const cli = path.join(root, 'feishu-cli.mjs');
@@ -49,4 +49,11 @@ test('partial chat results are treated as a failed export', () => {
   assert.equal(hasFailedChats([{ status: 'ok' }, { status: 'timeout' }]), true);
   assert.equal(hasFailedChats([{ status: 'ok' }]), false);
   assert.equal(hasFailedChats([]), false);
+});
+
+test('only transient chat-open failures are retried', () => {
+  assert.equal(isRetryableChatStatus('openfail'), true);
+  assert.equal(isRetryableChatStatus('applink'), true);
+  assert.equal(isRetryableChatStatus('timeout'), false);
+  assert.equal(isRetryableChatStatus('notfound'), false);
 });
