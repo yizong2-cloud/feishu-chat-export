@@ -22,12 +22,13 @@
 //   --no-headless      显示 Chrome 窗口（调试用）
 //   --port PORT        Chrome 调试端口（默认随机）
 //   --base-url URL     飞书租户地址（也可用 FEISHU_BASE_URL）
+//   FEISHU_CHAT_TIMEOUT_MS  单个会话读取预算（默认 45000）
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { connect, PAGE_HELPERS, EXTRACT_FN } from './export_lib.mjs';
-import { classifyPageState, classifyStartupFailure } from './cli-utils.mjs';
+import { classifyPageState, classifyStartupFailure, hasFailedChats } from './cli-utils.mjs';
 
 // ---------------- 参数解析 ----------------
 const args = process.argv.slice(2);
@@ -83,6 +84,8 @@ const OUT_DIR = opt.out || path.join(HOME, 'feishu_export', 'daily');
 const COOKIES_FILE = opt.cookies || path.join(CONFIG_DIR, 'cookies.json');
 const STATE_FILE = opt.state || path.join(OUT_DIR, '.state.json');
 const FEISHU_BASE_URL = (opt.baseUrl || process.env.FEISHU_BASE_URL || 'https://feishu.cn').replace(/\/+$/, '');
+const configuredChatTimeout = Number(process.env.FEISHU_CHAT_TIMEOUT_MS || 45000);
+const CHAT_TIMEOUT_MS = Number.isFinite(configuredChatTimeout) && configuredChatTimeout > 0 ? configuredChatTimeout : 45000;
 try {
   const parsedBaseUrl = new URL(FEISHU_BASE_URL);
   if (!/^https?:$/.test(parsedBaseUrl.protocol)) throw new Error('protocol');
@@ -275,6 +278,20 @@ async function enumerateChats(evl) {
 
 // ---------------- 会话处理 ----------------
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+class ChatTimeoutError extends Error {
+  constructor(chat, timeoutMs) {
+    super(`会话读取超过 ${timeoutMs}ms: ${chat || '未知会话'}`);
+    this.name = 'ChatTimeoutError';
+  }
+}
+function ensureChatBudget(deadline, chat) {
+  if (Date.now() >= deadline) throw new ChatTimeoutError(chat, CHAT_TIMEOUT_MS);
+}
+async function chatSleep(ms, deadline, chat) {
+  ensureChatBudget(deadline, chat);
+  await sleep(Math.min(ms, Math.max(1, deadline - Date.now())));
+  ensureChatBudget(deadline, chat);
+}
 async function closeApplinkTabs(port) {
   try {
     const ver = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
@@ -291,17 +308,19 @@ async function closeApplinkTabs(port) {
   } catch (e) { return 0; }
 }
 
-async function clickAt(send, pos) {
+async function clickAt(send, pos, deadline, chat) {
+  ensureChatBudget(deadline, chat);
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pos.x, y: pos.y, pointerType: 'mouse', modifiers: 0, buttons: 0 });
-  await sleep(120);
+  await chatSleep(120, deadline, chat);
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pos.x, y: pos.y, pointerType: 'mouse', modifiers: 0, button: 'left', buttons: 1, clickCount: 1 });
-  await sleep(90);
+  await chatSleep(90, deadline, chat);
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pos.x, y: pos.y, pointerType: 'mouse', modifiers: 0, button: 'left', buttons: 0, clickCount: 1 });
 }
 
-async function openChat(send, evl, port, feedId) {
+async function openChat(send, evl, port, feedId, deadline, chatTitle) {
+  ensureChatBudget(deadline, chatTitle);
   await evl(`(() => { const sc = document.querySelector('.lark_feedMainList'); if (sc) sc.scrollTop = 0; return 'ok'; })()`);
-  await sleep(500);
+  await chatSleep(500, deadline, chatTitle);
   let posStr = await evl(`(() => {
     const el = document.querySelector('[data-feed-id="${feedId}"]');
     if (!el) return 'missing';
@@ -311,8 +330,9 @@ async function openChat(send, evl, port, feedId) {
   })()`);
   if (posStr === 'missing') {
     for (let i = 0; i < 100; i++) {
+      ensureChatBudget(deadline, chatTitle);
       await evl('window.__EXPORT_HELPERS.scrollFeed(600)');
-      await sleep(300);
+      await chatSleep(300, deadline, chatTitle);
       posStr = await evl(`(() => {
         const el = document.querySelector('[data-feed-id="${feedId}"]');
         if (!el) return 'missing';
@@ -324,12 +344,12 @@ async function openChat(send, evl, port, feedId) {
     }
   }
   if (posStr === 'missing') return 'notfound';
-  await clickAt(send, JSON.parse(posStr));
+  await clickAt(send, JSON.parse(posStr), deadline, chatTitle);
   for (let i = 0; i < 26; i++) {
-    await sleep(500);
+    await chatSleep(500, deadline, chatTitle);
     const cur = await evl('window.__EXPORT_HELPERS.currentChat()');
     if (cur === feedId) break;
-    if (i === 13) await clickAt(send, JSON.parse(posStr));
+    if (i === 13) await clickAt(send, JSON.parse(posStr), deadline, chatTitle);
   }
   const cur = await evl('window.__EXPORT_HELPERS.currentChat()');
   if (cur !== feedId) {
@@ -337,26 +357,27 @@ async function openChat(send, evl, port, feedId) {
     if (closed > 0) return 'applink';
     return 'openfail';
   }
-  await sleep(3000);
+  await chatSleep(3000, deadline, chatTitle);
   const btn = await evl('window.__EXPORT_HELPERS.clickToNewest()');
   if (btn && btn !== 'none') {
-    await clickAt(send, JSON.parse(btn));
-    await sleep(2200);
+    await clickAt(send, JSON.parse(btn), deadline, chatTitle);
+    await chatSleep(2200, deadline, chatTitle);
   }
   return 'ok';
 }
 
 // 加载窗口直到覆盖 T0（窗口最早消息时间 <= T0 或已到顶）
-async function loadToT0(evl, feedId, T0) {
+async function loadToT0(evl, feedId, T0, deadline, chatTitle) {
   let prevStart = -1, stall = 0;
   for (let i = 0; i < 1200; i++) {
+    ensureChatBudget(deadline, chatTitle);
     await evl('window.__EXPORT_HELPERS.msgToTop()');
     if (stall >= 3) {
       await evl(`(() => { const sc = document.querySelector('.chatMessageContainer .scroller'); if (sc) sc.scrollTop = 120; return 'ok'; })()`);
-      await sleep(120);
+      await chatSleep(120, deadline, chatTitle);
       await evl('window.__EXPORT_HELPERS.msgToTop()');
     }
-    await sleep(700);
+    await chatSleep(700, deadline, chatTitle);
     let st;
     try { st = JSON.parse(await evl('window.__EXPORT_HELPERS.loadState()')); } catch (e) { break; }
     if (st.startTime && st.startTime <= T0) return st; // 窗口已覆盖范围起点
@@ -369,24 +390,28 @@ async function loadToT0(evl, feedId, T0) {
 }
 
 // 渲染扫掠（补水图片/文件内容 + 收集媒体链接），有界
-async function renderSweep(evl) {
+async function renderSweep(evl, deadline, chatTitle) {
   try {
+    ensureChatBudget(deadline, chatTitle);
     await evl('window.__MEDIA = {}');
     await evl('window.__EXPORT_HELPERS.msgToBottom()');
-    await sleep(1200);
+    await chatSleep(1200, deadline, chatTitle);
     for (let i = 0; i < 600; i++) {
+      ensureChatBudget(deadline, chatTitle);
       const infoStr = await evl('window.__EXPORT_HELPERS.msgScrollInfo()');
       if (infoStr === 'none') break;
       const info = JSON.parse(infoStr);
       if (info.top <= 0) break;
       await evl('window.__EXPORT_HELPERS.msgScrollBy(-500)');
       await evl('window.__EXPORT_HELPERS.collectMedia()');
-      await sleep(50);
+      await chatSleep(50, deadline, chatTitle);
     }
-  } catch (e) {}
+  } catch (e) {
+    if (e instanceof ChatTimeoutError) throw e;
+  }
 }
 
-async function extractMessages(evl, T0, T1) {
+async function extractMessages(evl, T0, T1, deadline, chatTitle) {
   const posList = JSON.parse(await evl(`(() => {
     const st = window.__FEED_WIN_STORE.getState();
     const cm = st.get('chatMap');
@@ -400,6 +425,7 @@ async function extractMessages(evl, T0, T1) {
   const messages = [];
   const CHUNK = 600;
   for (let off = 0; off < posList.length; off += CHUNK) {
+    ensureChatBudget(deadline, chatTitle);
     const slice = posList.slice(off, off + CHUNK);
     const chunkJson = await evl(EXTRACT_FN(T0, T1, slice[0], slice[slice.length - 1]));
     messages.push(...JSON.parse(chunkJson));
@@ -409,18 +435,24 @@ async function extractMessages(evl, T0, T1) {
 }
 
 async function processChat(send, evl, port, chat, T0, T1) {
-  const r = await openChat(send, evl, port, chat.id);
-  if (r !== 'ok') return { chat, status: r, messages: [] };
-  await loadToT0(evl, chat.id, T0);
-  await renderSweep(evl);
-  let messages = await extractMessages(evl, T0, T1);
-  // 增量游标去重：(createTime, position) <= cursor 的已下载过
-  const cur = (state.perChat || {})[chat.id];
-  if (cur && mode === 'incremental') {
-    messages = messages.filter(m => m.createTime > cur.maxTime || (m.createTime === cur.maxTime && m.position > cur.maxPos));
+  const deadline = Date.now() + CHAT_TIMEOUT_MS;
+  try {
+    const r = await openChat(send, evl, port, chat.id, deadline, chat.title);
+    if (r !== 'ok') return { chat, status: r, messages: [] };
+    await loadToT0(evl, chat.id, T0, deadline, chat.title);
+    await renderSweep(evl, deadline, chat.title);
+    let messages = await extractMessages(evl, T0, T1, deadline, chat.title);
+    // 增量游标去重：(createTime, position) <= cursor 的已下载过
+    const cur = (state.perChat || {})[chat.id];
+    if (cur && mode === 'incremental') {
+      messages = messages.filter(m => m.createTime > cur.maxTime || (m.createTime === cur.maxTime && m.position > cur.maxPos));
+    }
+    const meta = JSON.parse(await evl('window.__EXPORT_HELPERS.chatMeta()'));
+    return { chat, status: 'ok', messages, meta };
+  } catch (e) {
+    if (e instanceof ChatTimeoutError) return { chat, status: 'timeout', messages: [] };
+    throw e;
   }
-  const meta = JSON.parse(await evl('window.__EXPORT_HELPERS.chatMeta()'));
-  return { chat, status: 'ok', messages, meta };
 }
 
 // ---------------- 输出 ----------------
@@ -558,13 +590,14 @@ for (const chat of candidates) {
 // 汇总输出
 const withMsgs = chatResults.filter(r => r.messages.length);
 const total = withMsgs.reduce((s, r) => s + r.messages.length, 0);
+const failedChats = chatResults.filter(r => r.status !== 'ok');
 const outJson = {
   exportedAt: new Date().toISOString(),
   range: { from: fmt(T0), to: fmt(T1), tz: '+08:00', fromUnix: T0, toUnix: T1 },
   totalMessages: total,
   chats: Object.fromEntries(withMsgs.map(r => [(r.meta && r.meta.chat) || r.chat.id, { meta: r.meta, messages: r.messages }])),
   skippedChats: skipped,
-  failedChats: chatResults.filter(r => r.status !== 'ok').map(r => ({ id: r.chat.id, title: r.chat.title || r.chat.id, status: r.status }))
+  failedChats: failedChats.map(r => ({ id: r.chat.id, title: r.chat.title || r.chat.id, status: r.status }))
 };
 const jsonPath = path.join(OUT_DIR, rangeLabel + '.json');
 fs.writeFileSync(jsonPath, JSON.stringify(outJson));
@@ -573,6 +606,16 @@ if (opt.markdown) {
   const mdPath = path.join(OUT_DIR, rangeLabel + '.md');
   fs.writeFileSync(mdPath, buildMarkdown(chatResults));
   console.log(`Markdown 汇总 → ${mdPath}`);
+}
+
+// Keep the diagnostic files for inspection, but fail the command when any
+// selected chat was not read completely. Callers (including Workboard) must
+// never mistake a partial export for a complete source or advance the cursor.
+if (hasFailedChats(chatResults)) {
+  console.error(`本次导出未完成：${failedChats.length} 个会话读取失败；输出仅供诊断，状态游标未更新。`);
+  try { proc.kill(); } catch (e) {}
+  try { fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 6, retryDelay: 300 }); } catch (e) {}
+  process.exit(2);
 }
 
 // 更新状态（增量游标）

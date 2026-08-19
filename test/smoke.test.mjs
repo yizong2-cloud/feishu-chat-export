@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { classifyPageState, classifyStartupFailure } from '../cli-utils.mjs';
+import { classifyPageState, classifyStartupFailure, hasFailedChats } from '../cli-utils.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const cli = path.join(root, 'feishu-cli.mjs');
@@ -43,4 +43,10 @@ test('startup classifier distinguishes a fully loaded page with no session list'
   assert.equal(classifyStartupFailure({ readyState: 'loading', feedCount: 0 }), 'loading');
   assert.equal(classifyStartupFailure({ readyState: 'complete', feedCount: 0 }), 'stalled');
   assert.equal(classifyStartupFailure({ readyState: 'complete', feedCount: 2 }), 'incompatible');
+});
+
+test('partial chat results are treated as a failed export', () => {
+  assert.equal(hasFailedChats([{ status: 'ok' }, { status: 'timeout' }]), true);
+  assert.equal(hasFailedChats([{ status: 'ok' }]), false);
+  assert.equal(hasFailedChats([]), false);
 });

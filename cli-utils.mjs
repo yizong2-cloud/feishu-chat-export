@@ -21,3 +21,7 @@ export function classifyStartupFailure(state = {}) {
   }
   return 'loading'
 }
+
+export function hasFailedChats(results = []) {
+  return Array.isArray(results) && results.some((result) => result && result.status !== 'ok')
+}

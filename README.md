@@ -44,6 +44,12 @@ FEISHU_BASE_URL=https://your-tenant.feishu.cn ./bin/feishu-export --today --mark
 | `--no-headless` | 显示 Chrome 窗口，便于排查页面兼容性 |
 | `--base-url URL` | 指定飞书租户地址；也可用 `FEISHU_BASE_URL` |
 
+单个会话读取默认有 45 秒预算，避免一个异常或超大群拖死整批导出；超时会把该会话标记为失败，命令以非零状态结束且不会推进增量游标。生成的 JSON/Markdown 仍会保留，方便诊断，但不会被当作完整来源。可按机器和网络情况调整：
+
+```bash
+FEISHU_CHAT_TIMEOUT_MS=90000 ./bin/feishu-export --today --markdown
+```
+
 增量状态默认写入输出目录的 `.state.json`。导出完成且存在消息时才推进游标；`--no-update-state` 可用于只读试跑。
 
 ## 安全说明
