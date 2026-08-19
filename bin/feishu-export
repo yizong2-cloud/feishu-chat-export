@@ -1,0 +1,5 @@
+#!/bin/bash
+# feishu-export — 飞书聊天记录按天/增量下载 CLI 便捷入口
+# 用法: feishu-export --today | --date 2026-08-14 | --incremental ...
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+exec node "$DIR/feishu-cli.mjs" "$@"

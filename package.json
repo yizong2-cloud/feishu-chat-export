@@ -1,0 +1,16 @@
+{
+  "name": "feishu-chat-export",
+  "version": "0.1.0",
+  "description": "Export Feishu web chat history to JSON and Markdown using a local browser session.",
+  "type": "module",
+  "bin": {
+    "feishu-export": "./bin/feishu-export"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,19 @@
+# Local authentication and session state — never commit these.
+cookies.json
+*.cookies.json
+.state.json
+state.json
+
+# Personal exports and generated files.
+daily/
+output/
+exports/
+*.jsonl
+*.zip
+
+# Local tooling.
+.DS_Store
+node_modules/
+.env
+.env.*
+!.env.example
