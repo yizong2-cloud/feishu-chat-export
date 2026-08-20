@@ -18,6 +18,7 @@
 //   --no-update-state  本次不更新增量游标
 //   --refresh-chats    强制重新扫描会话列表（默认复用缓存）
 //   --limit-chats N    只处理前 N 个会话（调试用）
+//   --chat-id ID       只处理指定会话（可重复，适合隔离失败会话）
 //   --headless         使用无头 Chrome（默认）
 //   --no-headless      显示 Chrome 窗口（调试用）
 //   --port PORT        Chrome 调试端口（默认随机）
@@ -28,11 +29,11 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { connect, PAGE_HELPERS, EXTRACT_FN } from './export_lib.mjs';
-import { classifyPageState, classifyStartupFailure, hasFailedChats, isRetryableChatStatus } from './cli-utils.mjs';
+import { classifyPageState, classifyStartupFailure, hasFailedChats, isRetryableChatStatus, shouldUpdateState } from './cli-utils.mjs';
 
 // ---------------- 参数解析 ----------------
 const args = process.argv.slice(2);
-const opt = { out: null, cookies: null, state: null, markdown: false, updateState: true, refreshChats: false, limitChats: null, port: 0, headless: true };
+const opt = { out: null, cookies: null, state: null, markdown: false, updateState: true, refreshChats: false, limitChats: null, chatIds: [], port: 0, headless: true };
 let mode = null, modeArg = null, rangeArg = null;
 const needValue = (flag, index) => {
   const value = args[index + 1];
@@ -66,6 +67,7 @@ for (let i = 0; i < args.length; i++) {
     case '--no-update-state': opt.updateState = false; break;
     case '--refresh-chats': opt.refreshChats = true; break;
     case '--limit-chats': opt.limitChats = positiveInt(a, needValue(a, i)); i++; break;
+    case '--chat-id': opt.chatIds.push(needValue(a, i)); i++; break;
     case '--port': opt.port = positiveInt(a, needValue(a, i), { allowZero: true }); i++; break;
     case '--headless': opt.headless = true; break;
     case '--no-headless': opt.headless = false; break;
@@ -152,8 +154,13 @@ if (mode === 'incremental' && T1 - T0 < 60) { console.log('距上次同步不到
 
 const fmt = (t) => new Date(t * 1000 + TZ * 1000).toISOString().replace('T', ' ').slice(0, 16);
 rangeLabel = `range_${new Date(T0 * 1000 + TZ * 1000).toISOString().slice(0, 10)}_${new Date(T1 * 1000 + TZ * 1000).toISOString().slice(0, 10)}`;
+if (opt.chatIds.length) {
+  const targetLabel = opt.chatIds.map(id => String(id).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48)).join('_').slice(0, 120);
+  rangeLabel += `_chat_${targetLabel}`;
+}
 console.log(`下载范围: ${fmt(T0)} ~ ${fmt(T1)} (+08:00)`);
 console.log(`输出目录: ${OUT_DIR}`);
+if (opt.chatIds.length) console.log('指定会话模式：使用独立诊断文件，且不会推进增量游标。');
 
 // ---------------- 状态文件 ----------------
 function loadState() {
@@ -325,7 +332,8 @@ async function openChat(send, evl, port, feedId, deadline, chatTitle) {
     const el = document.querySelector('[data-feed-id="${feedId}"]');
     if (!el) return 'missing';
     el.scrollIntoView({ block: 'center' });
-    const r = el.getBoundingClientRect();
+    const target = el.querySelector('.a11y_feed_card_item') || el;
+    const r = target.getBoundingClientRect();
     return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) });
   })()`);
   if (posStr === 'missing') {
@@ -337,7 +345,8 @@ async function openChat(send, evl, port, feedId, deadline, chatTitle) {
         const el = document.querySelector('[data-feed-id="${feedId}"]');
         if (!el) return 'missing';
         el.scrollIntoView({ block: 'center' });
-        const r = el.getBoundingClientRect();
+        const target = el.querySelector('.a11y_feed_card_item') || el;
+        const r = target.getBoundingClientRect();
         return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) });
       })()`);
       if (posStr !== 'missing') break;
@@ -349,12 +358,19 @@ async function openChat(send, evl, port, feedId, deadline, chatTitle) {
     await chatSleep(500, deadline, chatTitle);
     const cur = await evl('window.__EXPORT_HELPERS.currentChat()');
     if (cur === feedId) break;
-    if (i === 13) await clickAt(send, JSON.parse(posStr), deadline, chatTitle);
+    if (i === 13) {
+      // Some feed rows keep an overlay or stale virtual-list position after the
+      // first trusted pointer click. Re-find the live row, invoke its normal DOM
+      // click handler, then send one fresh trusted click at the new coordinates.
+      posStr = await evl(`window.__EXPORT_HELPERS.activateFeedById(${JSON.stringify(feedId)})`);
+      if (posStr !== 'missing') await clickAt(send, JSON.parse(posStr), deadline, chatTitle);
+    }
   }
   const cur = await evl('window.__EXPORT_HELPERS.currentChat()');
   if (cur !== feedId) {
     const closed = await closeApplinkTabs(port);
     if (closed > 0) return 'applink';
+    console.log(`    ${chatTitle || feedId}: 页面未切换到目标会话（当前会话键 ${cur || 'none'}）`);
     return 'openfail';
   }
   await chatSleep(3000, deadline, chatTitle);
@@ -547,7 +563,7 @@ if (!ready) {
   } else if (classifyStartupFailure(lastPageState) === 'stalled') {
     console.error('飞书页面已完成加载，但会话列表没有出现；这通常是登录态未被浏览器接受、租户页面未完成初始化，或前端资源被拦截。请先重新导出 Cookies，再用 --no-headless 观察页面；若仍复现，再检查飞书租户/前端是否改版。');
   } else {
-    console.error('未能进入飞书（登录态可能已过期，请重新导出浏览器 Cookies 到 ' + COOKIES_FILE + '）');
+    console.error('飞书在 90 秒内未完成初始化（可能是网络/页面资源加载缓慢，也可能是登录态已过期）。请先稍后重试；若连续出现，再重新导出 Cookies 到 ' + COOKIES_FILE + '，或用 --no-headless 查看页面。');
   }
   try { proc.kill(); } catch (e) {}
   process.exit(1);
@@ -556,10 +572,22 @@ await evl(PAGE_HELPERS);
 
 const chats = await enumerateChats(evl);
 let candidates = chats;
-if (opt.limitChats) candidates = chats.slice(0, opt.limitChats);
+if (opt.chatIds.length) {
+  const requested = new Set(opt.chatIds);
+  candidates = chats.filter(chat => requested.has(String(chat.id)));
+  const found = new Set(candidates.map(chat => String(chat.id)));
+  const missing = [...requested].filter(id => !found.has(String(id)));
+  if (missing.length) {
+    console.error(`找不到指定会话 ID: ${missing.join(', ')}；请用最近一次诊断 JSON 的 failedChats[].id 重试。`);
+    process.exit(1);
+  }
+  console.log(`仅处理指定会话：${candidates.map(chat => chat.title || chat.id).join(', ')}`);
+}
+if (opt.limitChats) candidates = candidates.slice(0, opt.limitChats);
 // 增量/范围模式：跳过最后活跃时间早于 T0 的会话（previews 有 updateTime 时）
 const skipped = [];
 candidates = candidates.filter(c => {
+  if (opt.chatIds.length) return true;
   if (c.updateTime && c.updateTime < T0 * 1000) { skipped.push(c.title || c.id); return false; }
   return true;
 });
@@ -571,14 +599,20 @@ let consecutiveOpenFailures = 0;
 let processed = 0;
 for (const chat of candidates) {
   processed++;
+  const startedAt = Date.now();
+  const title = chat.title || chat.id;
+  console.log(`  [${processed}/${candidates.length}] ${title}: 开始读取（单会话预算 ${Math.round(CHAT_TIMEOUT_MS / 1000)}s）`);
   try {
     const r = await processChatWithRetry(send, evl, port, chat, T0, T1);
+    r.durationMs = Date.now() - startedAt;
     chatResults.push(r);
     const n = r.messages.length;
+    const duration = `${(r.durationMs / 1000).toFixed(1)}s`;
     if (r.status === 'ok') consecutiveOpenFailures = 0;
     else consecutiveOpenFailures++;
-    if (n) console.log(`  [${processed}/${candidates.length}] ${(r.meta && r.meta.name) || chat.title || chat.id}: ${n} 条`);
-    else if (r.status !== 'ok') console.log(`  [${processed}/${candidates.length}] ${chat.title || chat.id}: 跳过(${r.status})`);
+    if (n) console.log(`  [${processed}/${candidates.length}] ${(r.meta && r.meta.name) || title}: ${n} 条（${duration}）`);
+    else if (r.status !== 'ok') console.log(`  [${processed}/${candidates.length}] ${title}: 跳过(${r.status}，${duration})`);
+    else console.log(`  [${processed}/${candidates.length}] ${title}: 无新增消息（${duration}）`);
     if (consecutiveOpenFailures >= MAX_CONSECUTIVE_OPEN_FAILURES) {
       console.error(`连续 ${MAX_CONSECUTIVE_OPEN_FAILURES} 个会话无法打开（${chatResults.slice(-MAX_CONSECUTIVE_OPEN_FAILURES).map(x => `${x.chat.title || x.chat.id}:${x.status}`).join(', ')}），停止本次导出；请检查飞书页面状态或导出器兼容性。`);
       try { proc.kill(); } catch (e) {}
@@ -586,8 +620,9 @@ for (const chat of candidates) {
       process.exit(2);
     }
   } catch (e) {
-    console.log(`  [${processed}/${candidates.length}] ${chat.title || chat.id}: 出错 ${e.message}`);
-    chatResults.push({ chat, status: 'error: ' + e.message, messages: [] });
+    const durationMs = Date.now() - startedAt;
+    console.log(`  [${processed}/${candidates.length}] ${title}: 出错 ${e.message}（${(durationMs / 1000).toFixed(1)}s）`);
+    chatResults.push({ chat, status: 'error: ' + e.message, messages: [], durationMs });
     consecutiveOpenFailures++;
     if (consecutiveOpenFailures >= MAX_CONSECUTIVE_OPEN_FAILURES) {
       console.error(`连续 ${MAX_CONSECUTIVE_OPEN_FAILURES} 个会话处理失败，停止本次导出；请检查飞书页面状态或导出器兼容性。`);
@@ -608,7 +643,7 @@ const outJson = {
   totalMessages: total,
   chats: Object.fromEntries(withMsgs.map(r => [(r.meta && r.meta.chat) || r.chat.id, { meta: r.meta, messages: r.messages }])),
   skippedChats: skipped,
-  failedChats: failedChats.map(r => ({ id: r.chat.id, title: r.chat.title || r.chat.id, status: r.status }))
+  failedChats: failedChats.map(r => ({ id: r.chat.id, title: r.chat.title || r.chat.id, status: r.status, durationMs: r.durationMs || null }))
 };
 const jsonPath = path.join(OUT_DIR, rangeLabel + '.json');
 fs.writeFileSync(jsonPath, JSON.stringify(outJson));
@@ -630,7 +665,8 @@ if (hasFailedChats(chatResults)) {
 }
 
 // 更新状态（增量游标）
-if (opt.updateState && withMsgs.length) {
+const updateState = shouldUpdateState(opt.updateState, opt.chatIds);
+if (updateState && withMsgs.length) {
   const maxByChat = {};
   let globalMax = state.lastSync || 0;
   for (const r of withMsgs) {
@@ -648,7 +684,7 @@ if (opt.updateState && withMsgs.length) {
     saveState();
     console.log(`状态已更新：lastSync=${fmt(state.lastSync)}（下次 --incremental 将从这里继续）`);
   }
-} else if (opt.updateState) {
+} else if (updateState) {
   console.log('本次没有新消息，状态游标保持不变。');
 }
 
@@ -687,6 +723,7 @@ function printHelp() {
   --no-update-state    本次不更新增量游标
   --refresh-chats      强制重扫会话列表
   --limit-chats N      只处理前 N 个会话（调试用）
+  --chat-id ID         只处理指定会话；可重复（用 failedChats[].id 隔离重试）
   --headless           使用无头 Chrome（默认）
   --no-headless        显示 Chrome 窗口（调试用）
   --port PORT          Chrome 调试端口（默认随机）

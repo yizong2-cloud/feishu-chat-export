@@ -50,7 +50,17 @@ window.__EXPORT_HELPERS = {
     const el = document.querySelector('[data-feed-id="' + feedId + '"]');
     if (!el) return 'missing';
     el.scrollIntoView({block: 'center'});
-    const r = el.getBoundingClientRect();
+    const target = el.querySelector('.a11y_feed_card_item') || el;
+    const r = target.getBoundingClientRect();
+    return JSON.stringify({x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)});
+  },
+  activateFeedById: (feedId) => {
+    const el = document.querySelector('[data-feed-id="' + feedId + '"]');
+    if (!el) return 'missing';
+    el.scrollIntoView({block: 'center'});
+    const target = el.querySelector('.a11y_feed_card_item') || el;
+    target.click();
+    const r = target.getBoundingClientRect();
     return JSON.stringify({x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)});
   },
   // click the "back to newest" floating button if visible

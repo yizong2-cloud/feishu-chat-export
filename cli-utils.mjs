@@ -29,3 +29,7 @@ export function hasFailedChats(results = []) {
 export function isRetryableChatStatus(status) {
   return status === 'openfail' || status === 'applink'
 }
+
+export function shouldUpdateState(updateRequested, chatIds = []) {
+  return Boolean(updateRequested) && (!Array.isArray(chatIds) || chatIds.length === 0)
+}

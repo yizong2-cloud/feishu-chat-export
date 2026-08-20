@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { classifyPageState, classifyStartupFailure, hasFailedChats, isRetryableChatStatus } from '../cli-utils.mjs';
+import { classifyPageState, classifyStartupFailure, hasFailedChats, isRetryableChatStatus, shouldUpdateState } from '../cli-utils.mjs';
+import { PAGE_HELPERS } from '../export_lib.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const cli = path.join(root, 'feishu-cli.mjs');
@@ -12,6 +13,7 @@ test('help is available without a browser or cookies', () => {
   assert.equal(result.status, 0);
   assert.match(result.stdout, /--incremental/);
   assert.match(result.stdout, /--base-url/);
+  assert.match(result.stdout, /--chat-id/);
 });
 
 test('missing option values fail early', () => {
@@ -30,6 +32,12 @@ test('invalid chat limits fail before launching Chrome', () => {
   const result = spawnSync(process.execPath, [cli, '--limit-chats', '0'], { encoding: 'utf8' });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /必须是正整数/);
+});
+
+test('missing chat id fails before launching Chrome', () => {
+  const result = spawnSync(process.execPath, [cli, '--chat-id'], { encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--chat-id 需要一个值/);
 });
 
 test('startup classifier distinguishes login redirects from frontend incompatibility', () => {
@@ -56,4 +64,15 @@ test('only transient chat-open failures are retried', () => {
   assert.equal(isRetryableChatStatus('applink'), true);
   assert.equal(isRetryableChatStatus('timeout'), false);
   assert.equal(isRetryableChatStatus('notfound'), false);
+});
+
+test('targeted chat diagnostics never advance the global incremental state', () => {
+  assert.equal(shouldUpdateState(true, []), true);
+  assert.equal(shouldUpdateState(false, []), false);
+  assert.equal(shouldUpdateState(true, ['feed-1']), false);
+});
+
+test('feed activation targets the real accessible card when a wrapper is not clickable', () => {
+  assert.match(PAGE_HELPERS, /a11y_feed_card_item/);
+  assert.match(PAGE_HELPERS, /activateFeedById/);
 });

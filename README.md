@@ -41,6 +41,7 @@ FEISHU_BASE_URL=https://your-tenant.feishu.cn ./bin/feishu-export --today --mark
 | `--markdown` | 同时生成 Markdown 汇总 |
 | `--refresh-chats` | 强制重新扫描会话列表 |
 | `--limit-chats N` | 只处理前 N 个会话，便于试跑 |
+| `--chat-id ID` | 只处理指定会话；可重复，适合用诊断 JSON 的 `failedChats[].id` 隔离重试 |
 | `--no-headless` | 显示 Chrome 窗口，便于排查页面兼容性 |
 | `--base-url URL` | 指定飞书租户地址；也可用 `FEISHU_BASE_URL` |
 
@@ -48,6 +49,12 @@ FEISHU_BASE_URL=https://your-tenant.feishu.cn ./bin/feishu-export --today --mark
 
 ```bash
 FEISHU_CHAT_TIMEOUT_MS=90000 ./bin/feishu-export --today --markdown
+```
+
+导出会在每个会话开始和结束时输出序号、名称、耗时及失败状态，避免长批次看起来无响应。`--chat-id` 模式默认使用独立诊断文件且不推进增量游标，避免覆盖完整导出或因只处理一个会话而跨过其他会话。若完整导出留下 `failedChats`，可只读重试失败会话来定位问题：
+
+```bash
+./bin/feishu-export --since 2026-08-19 --chat-id <failedChats 中的 id>
 ```
 
 增量状态默认写入输出目录的 `.state.json`。导出完成且存在消息时才推进游标；`--no-update-state` 可用于只读试跑。
