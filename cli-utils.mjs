@@ -33,3 +33,10 @@ export function isRetryableChatStatus(status) {
 export function shouldUpdateState(updateRequested, chatIds = []) {
   return Boolean(updateRequested) && (!Array.isArray(chatIds) || chatIds.length === 0)
 }
+
+// Feishu's message feed can contain document-comment/preview notifications.
+// They look like chats in the DOM but have no chatMap entry to open; treating
+// them as chats produces a misleading "current chat key none" failure.
+export function isDocumentPreview(preview = {}) {
+  return Boolean(preview && preview.isPreview && preview.docUrl)
+}

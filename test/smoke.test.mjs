@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { classifyPageState, classifyStartupFailure, hasFailedChats, isRetryableChatStatus, shouldUpdateState } from '../cli-utils.mjs';
+import { classifyPageState, classifyStartupFailure, hasFailedChats, isDocumentPreview, isRetryableChatStatus, shouldUpdateState } from '../cli-utils.mjs';
 import { PAGE_HELPERS } from '../export_lib.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -75,4 +75,10 @@ test('targeted chat diagnostics never advance the global incremental state', () 
 test('feed activation targets the real accessible card when a wrapper is not clickable', () => {
   assert.match(PAGE_HELPERS, /a11y_feed_card_item/);
   assert.match(PAGE_HELPERS, /activateFeedById/);
+});
+
+test('document comment previews are not treated as chats', () => {
+  assert.equal(isDocumentPreview({ isPreview: true, docUrl: 'https://tenant.feishu.cn/wiki/doc' }), true);
+  assert.equal(isDocumentPreview({ isPreview: false, docUrl: 'https://tenant.feishu.cn/wiki/doc' }), false);
+  assert.equal(isDocumentPreview({ isPreview: true }), false);
 });

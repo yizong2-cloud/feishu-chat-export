@@ -221,7 +221,7 @@ async function injectCookies(wsSend) {
 async function enumerateChats(evl) {
   if (state.chats && !opt.refreshChats) {
     console.log(`复用缓存的会话列表（${state.chats.length} 个，--refresh-chats 强制重扫）`);
-    return state.chats;
+    return filterDocumentPreviews(evl, state.chats);
   }
   console.log('扫描会话列表...');
   // 等待 feed 渲染出来（首启冷启动可能较慢）
@@ -277,10 +277,47 @@ async function enumerateChats(evl) {
   const previews = JSON.parse(previewsRaw);
   const chats = [];
   for (const [id, title] of seen) chats.push({ id, title, updateTime: previews[id] || 0 });
-  state.chats = chats;
+  const filteredChats = await filterDocumentPreviews(evl, chats);
+  state.chats = filteredChats;
   saveState();
-  console.log(`发现 ${chats.length} 个会话`);
-  return chats;
+  console.log(`发现 ${filteredChats.length} 个会话`);
+  return filteredChats;
+}
+
+// The feed mixes real chats with document-comment/preview notifications. The
+// latter have a DOM row and feed id but deliberately do not enter chatMap, so
+// opening them can never succeed through the chat reader.
+async function filterDocumentPreviews(evl, chats) {
+  let ids = [];
+  try {
+    const raw = await evl(`(() => {
+      const p = window.__feedStore?.getState?.().previews;
+      if (!p) return '[]';
+      const keys = p.keySeq ? p.keySeq().toArray() : Object.keys(p);
+      const out = [];
+      for (const key of keys) {
+        const value = p.get ? p.get(key) : p[key];
+        if (value && value.isPreview && value.docUrl) out.push(String(key));
+      }
+      return JSON.stringify(out);
+    })()`);
+    ids = JSON.parse(raw);
+  } catch (error) {
+    // If the optional metadata probe fails, keep the normal chat path intact;
+    // the existing open failure handling remains the safe fallback.
+    return chats;
+  }
+  const documentIds = new Set(ids);
+  const filtered = chats.filter((chat) => !documentIds.has(String(chat.id)));
+  if (filtered.length !== chats.length) {
+    const skipped = chats.filter((chat) => documentIds.has(String(chat.id)));
+    console.log(`跳过 ${skipped.length} 个文档评论/预览通知（非聊天）: ${skipped.slice(0, 5).map((chat) => chat.title || chat.id).join(', ')}${skipped.length > 5 ? '...' : ''}`);
+    if (state.chats && state.chats.length !== filtered.length) {
+      state.chats = filtered;
+      saveState();
+    }
+  }
+  return filtered;
 }
 
 // ---------------- 会话处理 ----------------
